@@ -1,0 +1,162 @@
+---
+title: "Analysis of qPCR Data"
+always_allow_html: yes
+output:
+  html_document:
+    code_folding: hide
+    number_sections: yes
+    toc: yes
+    toc_depth: 5
+    theme: united
+---
+
+
+# Prepare the environment
+
+
+The "Results" folder was generated and key packages were loaded.
+
+
+```{r message=FALSE, warning=FALSE}
+# Prepare the "Results" folder.
+if(dir.exists("Results")){
+  unlink("Results", recursive = TRUE, force = TRUE)
+}
+dir.create("Results")
+
+# Load key packages.
+library(magrittr) # Pipe operator.
+library(cowplot) # Plotting.
+library(ggsignif) # For showing significance.
+```
+
+
+# Define parameters.
+
+
+```{r message=FALSE, warning=FALSE}
+input_file <- file.path("Data","formatted.csv")
+```
+
+
+# Prepare data.
+
+
+```{r message=FALSE, warning=FALSE}
+df <- readr::read_tsv(input_file) %>%
+  tidyr::drop_na()
+gene_names <- colnames(df)[!(colnames(df) %in% c("Sample","Label","Data"))] %>%
+  sort()
+for(i in gene_names){
+  aiup_mean <- mean(df[[i]][df[["Label"]] == "AIUP"])
+  df[[i]] <- df[[i]]/aiup_mean
+}
+df <- tidyr::gather(df, "Gene", "Expression", -Sample, -Label, -Data) %>%
+  dplyr::mutate(
+    Label = factor(Label, levels = c("AIUP", "ECT")),
+    Data = factor(
+      Data,
+      levels = c("Train", "Test"), labels = c("Discovery", "Prospective")
+    )
+  )
+df_means <- dplyr::group_by(df, Label, Data, Gene) %>%
+  dplyr::summarise(
+    N = n(),
+    SD = ifelse(N == 1, NA, sd(Expression)),
+    se = ifelse(N == 1, 0, sd(Expression)/sqrt(N-1)),
+    Expression = mean(Expression)
+  ) %>%
+  dplyr::ungroup()
+```
+
+
+# Plot the data
+
+
+```{r message=FALSE, warning=FALSE, fig.width=6.5, fig.height=9}
+plt <- ggplot(
+  data = df,
+  aes(Label, Expression, colour = Data)
+)+
+  ggbeeswarm::geom_quasirandom(dodge.width = 0.9)+
+  theme(
+    strip.background = element_blank(),
+    panel.spacing = unit(1, "lines")
+  )+
+  coord_cartesian(ylim = c(0,30), expand = FALSE)+
+  geom_bar(
+    data = df_means,
+    mapping = aes(Label, Expression, fill = Data),
+    alpha = 0.3,
+    stat = "identity", position = "dodge"
+  )+
+  geom_errorbar(
+    data = df_means,
+    mapping = aes(
+      ymin = Expression - se,
+      ymax = Expression + se,
+      group = Data
+    ),
+    position = position_dodge(width = 0.9),
+    width = 0.2,
+    colour = "black"
+  )+
+  facet_wrap(~Gene, scales = "free", nrow = 4)+
+  theme(
+    legend.position = "top",
+    axis.title.x = element_blank(),
+    legend.title = element_blank()
+  )+
+  geom_signif(
+    comparisons = list(c("AIUP","ECT")),
+    map_signif_level = TRUE,
+    colour = "black",
+    test = "wilcox.test",
+    test.args= c("alternative" = "less")
+  )+
+  annotate("segment", x=-Inf, xend=Inf, y=-Inf, yend=-Inf)+
+  annotate("segment", x=-Inf, xend=-Inf, y=-Inf, yend=Inf)+
+  annotate("segment", x=Inf, xend=-Inf, y=Inf, yend=Inf)+
+  annotate("segment", x=Inf, xend=Inf, y=Inf, yend=-Inf)+
+  ylab("Relative Expression")+
+  scale_fill_manual(values = c("#ff4d4d", "#0099ff"))+
+  scale_colour_manual(values = c("#ff4d4d", "#0099ff"))
+
+# Save the plot.
+cowplot::save_plot(
+  file.path("Results","qPCR_Figure.tiff"),
+  plt,
+  base_height = 9, base_width = 6.5
+)
+
+# Display the plot.
+plt
+```
+
+
+
+# Perform statistics
+```{r message=FALSE, warning=FALSE}
+pairwise_comparisons <- SimplifyStats::pairwise_stats(
+  df,
+  group_cols = c("Label", "Gene"),
+  var_cols = "Expression",
+  fxn = wilcox.test,
+  alternative = "less"
+) %>%
+  dplyr::filter(A.Gene == B.Gene) %>%
+  dplyr::mutate(fdr = p.adjust(p.value, method = "fdr"))
+
+
+# Output statistics.
+writexl::write_xlsx(
+  df_means, file.path("Results","Descriptive_Statistics.xlsx")
+)
+writexl::write_xlsx(
+  pairwise_comparisons, file.path("Results","Pairwise_Tests.xlsx")
+)
+writexl::write_xlsx(
+  dplyr::mutate(df, Source = "qPCR", Sample = paste0("PUL_", Sample)),
+  file.path("Results","qPCR_Normalized_Data.xlsx")
+)
+```

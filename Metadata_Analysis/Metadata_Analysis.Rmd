@@ -1,0 +1,178 @@
+---
+title: "Metadata Analysis"
+always_allow_html: yes
+output:
+  html_document:
+    code_folding: hide
+    number_sections: yes
+    toc: yes
+    toc_depth: 5
+    theme: united
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Overview
+The levels of five metadata characteristics were evaluated (age, BMI, gravidity, EGA, and serum progesterone).
+
+
+# Prepare the environment
+```{r message=FALSE, warning=FALSE}
+# Load packages.
+library(magrittr) # Pipe operator.
+library(cowplot) # Plotting.
+library(ggpubr) # Plotting.
+library(ggpubr) # Significance in plots.
+
+# Create the Results folder.
+if(dir.exists("Results")){
+  unlink("Results", recursive = TRUE, force = TRUE)
+}
+dir.create("Results")
+```
+
+
+# Prepare the data
+```{r message=FALSE, warning=FALSE}
+# Define data file paths.
+input_file <- file.path("Data", "Metadata.xls")
+
+# Load and arrange the data.
+df <- readxl::read_excel(input_file) %>%
+  dplyr::mutate(
+    `EGA (days)` = ifelse(is.na(EGA_day_component), NA, `EGA (days)`)
+  ) %>%
+  dplyr::select(-EGA_week_component, -EGA_day_component) %>%
+  tidyr::gather(
+    key = "Variable", value = "Measurement",
+    -Data, -Label, -Sample
+  )
+
+# Summarize the data.
+df_summary <- dplyr::group_by(
+  df,
+  Data, Label, Variable
+) %>%
+  dplyr::summarise(
+    N = dplyr::n(),
+    MEAN = mean(Measurement, na.rm = TRUE),
+    SD = sd(Measurement, na.rm = TRUE),
+    SE = ifelse(N == 1, NA, SD/sqrt(N-1)),
+    CI_low = qnorm(0.05, MEAN, SD),
+    CI_high = qnorm(0.95, MEAN, SD)
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(
+    CI_low = ifelse(CI_low < 0, 0, CI_low)
+  )
+
+# Save the summarized data.
+writexl::write_xlsx(
+  df_summary,
+  file.path("Results", "SummarizedData.xlsx")
+)
+
+# Display the summarized data.
+knitr::kable(df_summary)
+```
+
+
+# Perform statistics
+
+
+```{r message=FALSE, warning=FALSE}
+t_stats <- SimplifyStats::pairwise_stats(
+  dplyr::filter(
+    df, Data != "Horne lab"
+  ),
+  group_cols = c("Data","Label","Variable"),
+  var_cols = "Measurement",
+  fxn = t.test,
+  two_way = TRUE
+) %>%
+  dplyr::filter(
+    A.Variable == B.Variable,
+    (A.Data == B.Data & A.Label == "AIUP" & B.Label == "ECT") |
+      (A.Data == "Discovery" & B.Data == "Prospective" & A.Label == B.Label)
+  ) %>%
+  tidyr::drop_na() %>%
+  dplyr::group_by(A.Data, B.Data) %>%
+  dplyr::mutate(fdr = p.adjust(p.value, method = "fdr")) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(
+    -estimate, -estimate1, -estimate2,
+    -statistic, -parameter, -conf.low, -conf.high, -method, -alternative
+  )
+
+# Save the statistics.
+writexl::write_xlsx(
+  t_stats,
+  file.path("Results", "Statistics.xlsx")
+)
+
+# Display the statistics.
+knitr::kable(t_stats)
+```
+
+
+
+# Plot the data
+```{r message=FALSE, warning=FALSE, fig.width=6.5, fig.height=6.5}
+plt <- ggplot()+# Initialize the plot object.
+  geom_bar(# Add the bar layer.
+    data = dplyr::filter(df_summary, Data != "Horne lab"),
+    aes(Label, MEAN, fill = Data),
+    stat = "identity", position = "dodge",
+    alpha = 0.5
+  )+
+  ggbeeswarm::geom_quasirandom(# Add a beeswarm plot overlay.
+    data = dplyr::filter(df, Data != "Horne lab"),
+    mapping = aes(Label, Measurement, colour = Data),
+    dodge.width = 0.9
+  )+
+  geom_errorbar(# Add the errorbar layer next so that it appears on top.
+    data = dplyr::filter(df_summary, Data != "Horne lab"),
+    aes(
+      x = Label,
+      ymin = MEAN - SE,
+      ymax = MEAN + SE,
+      group = Data
+    ),
+    colour = "black", width = 0.1,
+    position = position_dodge(width = 0.9)
+  )+
+  scale_y_continuous(# Do not plot below 0 and give room above the top points.
+    expand = expand_scale(
+      mult = c(0,0.2),# Adjust this accordingly.
+      add = c(0,2)
+    )
+  )+
+  theme(# Fix theme elements.
+    axis.title.x = element_blank()# Remove the x axis label since its obvious.
+  )+# Set bar fill color and point color, respectively. The defaults are lame.
+  scale_fill_manual(values = c("#ff4d4d", "#0099ff", "#009933"))+
+  scale_colour_manual(values = c("#ff4d4d", "#0099ff", "#009933"))+
+  facet_wrap(~Variable, scales = "free", switch = "y", ncol = 2)+# Make panels.
+  theme(# Adjust additional theme elements not set above.
+    strip.background = element_blank(),# Removes the ugly gray strip.
+    panel.spacing = unit(1, "lines"),# Adjust spacing between panels.
+    strip.placement = "outside",# Make the strip look like the y axis label.
+    axis.title.y = element_blank(),# Remove the real y axis label.
+  )+
+  panel_border(colour = "black", size = 1)
+
+# Save the plot.
+cowplot::save_plot(
+  file.path("Results", "MetadataFigure.tiff"),
+  plt,
+  base_width = 6.5, base_height = 6.5
+)
+
+# Display the plot.
+plt
+```
+
+
+End of analysis

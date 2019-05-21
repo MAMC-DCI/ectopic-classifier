@@ -1,0 +1,1318 @@
+---
+title: "Analysis of nCounter Data"
+always_allow_html: yes
+output:
+  html_document:
+    code_folding: hide
+    number_sections: yes
+    toc: yes
+    toc_depth: 5
+    theme: united
+---
+
+
+# Prepare the environment
+The "Results" folder was generated and key packages were loaded.
+```{r message=FALSE, warning=FALSE}
+# Prepare the "Results" folder.
+if(dir.exists("Results")){
+  unlink("Results", recursive = TRUE, force = TRUE)
+}
+dir.create("Results")
+
+# Load key packages.
+library(magrittr) # Pipe operator.
+library(cowplot) # Plotting.
+library(ggsignif) # For showing significance.
+```
+
+
+# Prepare the data
+```{r message=FALSE, warning=FALSE}
+# Define the location of the data.
+data_path <- file.path("Data", "data.csv")
+
+# Load the data.
+raw_df <- readr::read_csv(data_path) %>%
+  dplyr::filter(., `Analyte Type` == "mRNA" | is.na(`Analyte Type`)) %>%
+  dplyr::select(., -`Accession #`, -`NS Probe ID`, -`Analyte Type`)
+housekeeping_genes <- sort(unique(
+  raw_df$`Probe Name`[raw_df$`Class Name` == "Housekeeping"]
+))
+genes <- sort(unique(
+  raw_df$`Probe Name`[raw_df$`Class Name` == "Endogenous"]
+))
+raw_df <- dplyr::select(raw_df, -`Class Name`)
+sample_classes <- unlist(raw_df[1,])[2:ncol(raw_df)]
+sample_info <- tibble::enframe(sample_classes, "File", "Type")
+raw_df <- raw_df[-1,]
+raw_df <- tidyr::gather(raw_df, "File", "Count", -`Probe Name`) %>%
+  dplyr::inner_join(
+    ., sample_info,
+    by = "File"
+  ) %>%
+  dplyr::mutate(
+    .,
+    Class = ifelse(
+      `Probe Name` %in% housekeeping_genes,
+      "Housekeeper", "Endogenous"
+    ),
+    Count = as.numeric(Count)
+  )
+
+# Define the path to the sample metadata.
+meta_path <- file.path("Data","Modeling_Metadata.xls")
+
+# Load metadata.
+meta_df <- readxl::read_excel(meta_path) %>%
+  dplyr::select(., -Group)
+
+# Join the metadata to the 
+raw_df <- raw_df %>%
+  dplyr::mutate(
+    .,
+    SampleName = gsub("^.*PUL ","",File) %>% 
+      gsub("_.*$","",.) %>% 
+      paste0("PUL_", .)
+  ) %>%
+  dplyr::mutate(SampleName = ifelse(!grepl("_PUL ",File), File, SampleName)) %>%
+  dplyr::select(., -File) %>%
+  dplyr::left_join(
+    ., meta_df,
+    by = c("SampleName" = "Sample")
+  ) %>%
+  dplyr::filter(!(is.na(Data) & (Type %in% c("AIUP","ECT")))) %>%
+  dplyr::mutate(Data = ifelse(is.na(Data), "Control", Data))
+
+# Normalize the counts.
+raw_df <- raw_df
+for(i in unique(raw_df$`Probe Name`)){
+  aiup_mean <- mean(raw_df$Count[
+    (raw_df$Type == "AIUP") & (raw_df$`Probe Name` == i) & 
+      (raw_df$Data == "Train")
+  ])
+  raw_df$Count[raw_df$`Probe Name` == i] <- raw_df$Count[
+    raw_df$`Probe Name` == i
+  ]/aiup_mean
+}
+raw_df <- dplyr::rename(raw_df, NormCount = "Count")
+```
+
+
+# Verify normalization
+```{r message=FALSE, warning=FALSE}
+# Perform pairwise statistics.
+loading_control_stats <- SimplifyStats::pairwise_stats(
+  dplyr::filter(raw_df, Class == "Housekeeper"),
+  group_cols = c("Type", "Probe Name"),
+  var_cols = "NormCount",
+  fxn = wilcox.test,
+  two_way = TRUE
+) %>%
+  dplyr::filter(
+    A.Type == "AIUP", B.Type == "ECT", `A.Probe Name` == `B.Probe Name`
+  ) %>%
+  dplyr::mutate(fdr = p.adjust(p.value, method = "fdr"))
+
+# Save the loading control stats.
+writexl::write_xlsx(
+  loading_control_stats,
+  file.path("Results","Loading_Control_Stats.xlsx")
+)
+
+# Display the loading control stats.
+knitr::kable(loading_control_stats)
+```
+
+
+```{r message=FALSE, warning=FALSE, fig.height=4, fig.width=5.5}
+df_means <- dplyr::filter(raw_df, Class == "Housekeeper") %>%
+  dplyr::mutate(
+    Type = factor(
+      Type, levels = (c("AIUP","ECT","Adipose","Liver","Lung"))
+    ),
+    Data = factor(
+      Data,
+      levels = c("Train","Test","Control"),
+      labels = c("Discovery","Prospective","Control")
+    )
+  ) %>%
+  dplyr::group_by(Type, Data, `Probe Name`) %>%
+  dplyr::summarise(
+    N = n(),
+    SD = ifelse(N == 1, NA, sd(NormCount)),
+    se = ifelse(N == 1, 0, sd(NormCount)/sqrt(N-1)),
+    NormCount = mean(NormCount)
+  ) %>%
+  dplyr::ungroup()
+plt <- ggplot(
+  dplyr::filter(raw_df, Class == "Housekeeper") %>%
+    dplyr::mutate(
+      Type = factor(
+        Type, levels = (c("AIUP","ECT","Adipose","Liver","Lung"))
+      ),
+      Data = factor(
+        Data,
+        levels = c("Train","Test","Control"),
+        labels = c("Discovery","Prospective","Control")
+      )
+    ),
+  aes(Type, NormCount, colour = Data)
+)+
+  # geom_boxplot()+
+  ggbeeswarm::geom_quasirandom(dodge.width = 0.9)+
+  geom_bar(
+    data = df_means,
+    mapping = aes(Type, NormCount, fill = Data),
+    alpha = 0.3,
+    stat = "identity", position = "dodge"
+  )+
+  geom_errorbar(
+    data = df_means,
+    mapping = aes(
+      ymin = NormCount - se,
+      ymax = NormCount + se,
+      group = Data
+    ),
+    position = position_dodge(width = 0.9),
+    width = 0.2,
+    colour = "black"
+  )+
+  coord_cartesian(ylim = c(0, 2.5), expand = FALSE)+
+  ylab("Relative Expression")+
+  theme(
+    plot.margin = unit(c(0,1,0,0), "cm"),
+    strip.background = element_blank(),
+    axis.title.x = element_blank(),
+    panel.spacing = unit(1, "lines")
+  )+
+  ylab("Relative Expression")+
+  geom_signif(
+    comparisons = list(c("AIUP","ECT")),
+    map_signif_level = TRUE,
+    colour = "black",
+    test = "wilcox.test"
+  )+
+  facet_wrap(~`Probe Name`, scales = "free", nrow = 3)+
+  annotate("segment", x=-Inf, xend=Inf, y=-Inf, yend=-Inf)+
+  annotate("segment", x=-Inf, xend=-Inf, y=-Inf, yend=Inf)+
+  annotate("segment", x=Inf, xend=-Inf, y=Inf, yend=Inf)+
+  annotate("segment", x=Inf, xend=Inf, y=Inf, yend=-Inf)+
+  scale_fill_manual(values = c("#ff4d4d", "#0099ff", "#009933"))+
+  scale_colour_manual(values = c("#ff4d4d", "#0099ff", "#009933"))
+
+# Save the plot.
+cowplot::save_plot(
+  file.path("Results", "Housekeeping genes.tiff"),
+  plt,
+  base_height = 4, base_width = 5.5
+)
+
+# Display the plot.
+plt
+```
+
+
+Expression level plots were generated and saved for all genes. All of these plots were saved to the Results folder in the "IndividualGenes" directory.
+```{r message=FALSE, warning=FALSE, fig.width=6.5, fig.height=4}
+# Create an output folder.
+out_dir <- file.path("Results","IndividualGenes")
+if(dir.exists(out_dir)){
+  unlink(out_dir)
+}
+dir.create(out_dir)
+
+for(gene in genes){
+  # Subset the data.
+  mini_df <- dplyr::filter(
+    raw_df, Class == "Endogenous", `Probe Name` == gene
+  ) %>%
+    dplyr::mutate(
+      .,
+      Type = factor(
+        Type,
+        levels = c("AIUP", "ECT", "Adipose", "Liver", "Lung")
+      ),
+      Data = factor(
+        Data,
+        levels = c("Train","Test","Control"),
+        labels = c("Discovery","Prospective","Control")
+      )
+    )
+  
+  df_means <- mini_df %>%
+  dplyr::mutate(
+    Type = factor(
+      Type, levels = (c("AIUP","ECT","Adipose","Liver","Lung"))
+    )
+  ) %>%
+  dplyr::group_by(Type, Data) %>%
+  dplyr::summarise(
+    N = n(),
+    SD = ifelse(N == 1, NA, sd(NormCount)),
+    se = ifelse(N == 1, 0, sd(NormCount)/sqrt(N-1)),
+    NormCount = mean(NormCount)
+  ) %>%
+  dplyr::ungroup()
+  
+  max_count <- max(mini_df$NormCount)
+  upper_bound <- 1.3*max_count
+  
+  # Generate the plot.
+  plt <- ggplot(
+    mini_df,
+    aes(Type, NormCount, colour = Data)
+  ) + 
+    ggbeeswarm::geom_quasirandom(dodge.width = 0.9)+
+    geom_bar(
+      data = df_means,
+      mapping = aes(Type, NormCount, fill = Data),
+      alpha = 0.3,
+      stat = "identity", position = "dodge"
+    )+
+    geom_errorbar(
+      data = df_means,
+      mapping = aes(
+        ymin = NormCount - se,
+        ymax = NormCount + se,
+        group = Data
+      ),
+      position = position_dodge(width = 0.9),
+      width = 0.2,
+      colour = "black"
+    )+
+    geom_signif(
+      comparisons = list(c("AIUP","ECT")),
+      map_signif_level = TRUE,
+      colour = "black",
+      test = "wilcox.test"
+    )+
+    ggtitle(gene)+
+    scale_y_continuous(limits = c(0, upper_bound))+
+    coord_cartesian(ylim = c(0, upper_bound), expand = FALSE)+
+    theme(axis.title.x = element_blank())+
+    ylab("Relative Expression")+
+  annotate("segment", x=-Inf, xend=Inf, y=-Inf, yend=-Inf)+
+  annotate("segment", x=-Inf, xend=-Inf, y=-Inf, yend=Inf)+
+  annotate("segment", x=Inf, xend=-Inf, y=Inf, yend=Inf)+
+  annotate("segment", x=Inf, xend=Inf, y=Inf, yend=-Inf)+
+  scale_fill_manual(values = c("#ff4d4d", "#0099ff", "#009933"))+
+  scale_colour_manual(values = c("#ff4d4d", "#0099ff", "#009933"))
+  
+  # Save the plot.
+  cowplot::save_plot(
+    file.path("Results", "IndividualGenes", paste0(gene, ".tiff")),
+    plt,
+    base_height = 4, base_width = 6.5
+  )
+}
+```
+
+
+A paneled plot, containing only the genes in the classifier, was also generated.
+
+
+```{r message=FALSE, warning=FALSE, fig.width=6.5, fig.height=9}
+# Subset the data.
+genes_of_interest <- c(
+  "ARMC3", "C20orf85", "CFAP47", "CFAP126", "DNAH12", "LRRC46",
+  "LPAR3", "RSPH4A", "STOML3", "TPPP3", "WDR49", "ZBBX"
+)
+mini_df <- dplyr::filter(
+  raw_df, Class == "Endogenous", `Probe Name` %in% genes_of_interest
+) %>%
+  dplyr::mutate(
+    .,
+    Type = factor(
+      Type,
+      levels = c("AIUP", "ECT", "Adipose", "Liver", "Lung")
+    ),
+    Data = factor(
+      Data,
+      levels = c("Train","Test","Control"),
+      labels = c("Discovery","Prospective","Control")
+    )
+  )
+
+df_means <- mini_df %>%
+  dplyr::mutate(
+    Type = factor(
+      Type, levels = (c("AIUP","ECT","Adipose","Liver","Lung"))
+    )
+  ) %>%
+  dplyr::group_by(Type, Data, `Probe Name`) %>%
+  dplyr::summarise(
+    N = n(),
+    SD = ifelse(N == 1, NA, sd(NormCount)),
+    se = ifelse(N == 1, 0, sd(NormCount)/sqrt(N-1)),
+    NormCount = mean(NormCount)
+  ) %>%
+  dplyr::ungroup()
+
+max_count <- max(mini_df$NormCount)
+upper_bound <- 1.2*max_count
+
+# Generate the plot.
+plt <- ggplot(
+  mini_df,
+  aes(Type, NormCount, colour = Data)
+) + 
+  ggbeeswarm::geom_quasirandom(dodge.width = 0.9)+
+  geom_bar(
+    data = df_means,
+    mapping = aes(Type, NormCount, fill = Data),
+    alpha = 0.3,
+    stat = "identity", position = "dodge"
+  )+
+  geom_errorbar(
+    data = df_means,
+    mapping = aes(
+      ymin = NormCount - se,
+      ymax = NormCount + se,
+      group = Data
+    ),
+    position = position_dodge(width = 0.9),
+    width = 0.2,
+    colour = "black"
+  )+
+  geom_signif(
+    comparisons = list(c("AIUP","ECT")),
+    map_signif_level = TRUE,
+    colour = "black",
+    test = "wilcox.test",
+    margin_top = -0.2
+  )+
+  scale_y_continuous(expand = expand_scale(
+    mult = c(0, 0.25),
+    add = c(0, 0)
+  ))+
+  facet_wrap(~`Probe Name`, scales = "free", nrow = 6)+
+  # coord_cartesian(ylim = c(0, upper_bound), expand = FALSE)+
+  theme(
+    axis.title.x = element_blank(),
+    strip.background = element_blank(),
+    panel.spacing = unit(1, "lines"),
+    legend.position = "top",
+    legend.title = element_blank()
+  )+
+  ylab("Relative Expression")+
+  annotate("segment", x=-Inf, xend=Inf, y=-Inf, yend=-Inf)+
+  annotate("segment", x=-Inf, xend=-Inf, y=-Inf, yend=Inf)+
+  annotate("segment", x=Inf, xend=-Inf, y=Inf, yend=Inf)+
+  annotate("segment", x=Inf, xend=Inf, y=Inf, yend=-Inf)+
+  scale_fill_manual(values = c("#ff4d4d", "#0099ff", "#009933"))+
+  scale_colour_manual(values = c("#ff4d4d", "#0099ff", "#009933"))
+
+# Save the plot.
+cowplot::save_plot(
+  file.path("Results", "RelativeGeneExpression.tiff"),
+  plt,
+  base_height = 9, base_width = 6.5
+)
+
+#  Display the plot.
+plt
+```
+
+
+Finally, pairwise Wilcoxon rank-sum tests were performed.
+```{r message=FALSE, warning=FALSE}
+# Perform pairwise statistics.
+gene_stats <- SimplifyStats::pairwise_stats(
+  dplyr::filter(raw_df, `Probe Name` %in% genes_of_interest),
+  group_cols = c("Type", "Probe Name"),
+  var_cols = "NormCount",
+  fxn = wilcox.test,
+  two_way = TRUE
+) %>%
+  dplyr::filter(
+    A.Type == "AIUP", B.Type == "ECT", `A.Probe Name` == `B.Probe Name`
+  ) %>%
+  dplyr::mutate(fdr = p.adjust(p.value, method = "fdr")) %>%
+  dplyr::rename(`Probe Name` = "A.Probe Name") %>%
+  dplyr::select(-Variable, -A.Type, -B.Type, -`B.Probe Name`, -statistic)
+
+fc_df <- dplyr::filter(raw_df, Class == "Endogenous", Type %in% c("AIUP", "ECT")) %>%
+  dplyr::mutate(., Type = factor(Type, levels = c("AIUP", "ECT"))) %>%
+  dplyr::group_by(., Type, `Probe Name`) %>%
+  dplyr::summarise(., MEAN = mean(NormCount)) %>%
+  dplyr::ungroup() %>%
+  tidyr::spread(., Type, MEAN) %>%
+  dplyr::mutate(., fc = ECT/AIUP, l2fc = log2(fc))
+
+gene_stats <- dplyr::inner_join(
+  gene_stats, fc_df,
+  by = "Probe Name"
+) %>%
+  dplyr::arrange(`Probe Name`)
+
+# Save the loading control stats.
+writexl::write_xlsx(
+  gene_stats,
+  file.path("Results","Gene_Stats.xlsx")
+)
+
+# Display the loading control stats.
+knitr::kable(gene_stats)
+```
+
+
+Another paneled plot like above was created. In this plot, however, the control with the intermediate mean expression level was dropped. This paneled plot is otherwise identical to the one above.
+
+
+```{r message=FALSE, warning=FALSE, fig.width=6.5, fig.height=9}
+# Subset the data.
+mini_df <- dplyr::filter(
+  raw_df, Class == "Endogenous", `Probe Name` %in% genes_of_interest
+) %>%
+  dplyr::mutate(
+    .,
+    Type = factor(
+      Type,
+      levels = c("AIUP", "ECT", "Adipose", "Liver", "Lung")
+    ),
+    Data = factor(
+      Data,
+      levels = c("Train","Test","Control"),
+      labels = c("Discovery","Prospective","Control")
+    )
+  )
+
+df_means <- mini_df %>%
+  dplyr::mutate(
+    Type = factor(
+      Type, levels = (c("AIUP","ECT","Adipose","Liver","Lung"))
+    )
+  ) %>%
+  dplyr::group_by(Type, Data, `Probe Name`) %>%
+  dplyr::summarise(
+    N = n(),
+    SD = ifelse(N == 1, NA, sd(NormCount)),
+    se = ifelse(N == 1, 0, sd(NormCount)/sqrt(N-1)),
+    NormCount = mean(NormCount)
+  ) %>%
+  dplyr::ungroup()
+
+df_control_means <- dplyr::filter(
+  df_means,
+  Data == "Control"
+) %>%
+  dplyr::group_by(`Probe Name`) %>%
+  dplyr::summarise(Type = Type[NormCount == median(NormCount)]) %>%
+  dplyr::ungroup()
+
+
+df_means <- dplyr::filter(
+  df_means,
+  !(paste(`Probe Name`, Type) %in% paste(
+    df_control_means$`Probe Name`,
+    df_control_means$Type
+  ))
+)
+mini_df <- dplyr::filter(
+  mini_df,
+  !(paste(`Probe Name`, Type) %in% paste(
+    df_control_means$`Probe Name`,
+    df_control_means$Type
+  ))
+)
+
+max_count <- max(mini_df$NormCount)
+upper_bound <- 1.2*max_count
+
+# Generate the plot.
+plt <- ggplot(
+  mini_df,
+  aes(Type, NormCount, colour = Data)
+) + 
+  ggbeeswarm::geom_quasirandom(dodge.width = 0.9)+
+  geom_bar(
+    data = df_means,
+    mapping = aes(Type, NormCount, fill = Data),
+    alpha = 0.3,
+    stat = "identity", position = "dodge"
+  )+
+  geom_errorbar(
+    data = df_means,
+    mapping = aes(
+      ymin = NormCount - se,
+      ymax = NormCount + se,
+      group = Data
+    ),
+    position = position_dodge(width = 0.9),
+    width = 0.2,
+    colour = "black"
+  )+
+  geom_signif(
+    comparisons = list(c("AIUP","ECT")),
+    map_signif_level = TRUE,
+    colour = "black",
+    test = "wilcox.test",
+    margin_top = -0.2
+  )+
+  scale_y_continuous(expand = expand_scale(
+    mult = c(0, 0.25),
+    add = c(0, 0)
+  ))+
+  facet_wrap(~`Probe Name`, scales = "free", nrow = 6)+
+  # coord_cartesian(ylim = c(0, upper_bound), expand = FALSE)+
+  theme(
+    axis.title.x = element_blank(),
+    strip.background = element_blank(),
+    panel.spacing = unit(1, "lines"),
+    legend.position = "top",
+    legend.title = element_blank()
+  )+
+  ylab("Relative Expression")+
+  annotate("segment", x=-Inf, xend=Inf, y=-Inf, yend=-Inf)+
+  annotate("segment", x=-Inf, xend=-Inf, y=-Inf, yend=Inf)+
+  annotate("segment", x=Inf, xend=-Inf, y=Inf, yend=Inf)+
+  annotate("segment", x=Inf, xend=Inf, y=Inf, yend=-Inf)+
+  scale_fill_manual(values = c("#ff4d4d", "#0099ff", "#009933"))+
+  scale_colour_manual(values = c("#ff4d4d", "#0099ff", "#009933"))
+
+# Save the plot.
+cowplot::save_plot(
+  file.path("Results", "RelativeGeneExpression_ControlPairs.tiff"),
+  plt,
+  base_height = 9, base_width = 6.5
+)
+
+#  Display the plot.
+plt
+```
+
+
+# Predictive modeling
+
+
+The data was prepared for modeling.
+
+
+```{r message=FALSE, warning=FALSE}
+modeling_df <- dplyr::filter(
+  raw_df,
+  `Probe Name` %in% genes_of_interest,
+  Type %in% c("AIUP","ECT"),
+  Class == "Endogenous"
+) %>%
+  dplyr::select(-Class) %>%
+  tidyr::spread(key = `Probe Name`, value = NormCount)
+
+train_x <- dplyr::filter(modeling_df, Data == "Train")
+train_y <- train_x$Type
+train_x <- dplyr::select(train_x, -Type, -SampleName, -Data)
+
+test_x <- dplyr::filter(modeling_df, Data == "Test")
+test_y <- test_x$Type
+test_x <- dplyr::select(test_x, -Type, -SampleName, -Data)
+```
+
+
+Principal components analysis (PCA) was performed on the discovery data. The prospective data was then projected into the same subspace.
+
+
+```{r message=FALSE, warning=FALSE}
+train_pca <- FactoMineR::PCA(
+  train_x, graph = FALSE, ncp = 10
+)
+train_pca_df <- tibble::as_tibble(train_pca$ind$coord) %>%
+  dplyr::mutate(Label = train_y)
+test_pca_df <- tibble::as_tibble(
+  FactoMineR::predict.PCA(train_pca, test_x)$coord
+) %>%
+  dplyr::mutate(Label = test_y)
+
+train_x <- train_pca_df[,c("Dim.1","Dim.2")]
+test_x <- test_pca_df[,c("Dim.1","Dim.2")]
+```
+
+
+A scatterplot of the PCA results was generated.
+
+
+```{r message=FALSE, warning=FALSE, fig.width=6.5, fig.height=4}
+pca_df <- tibble::data_frame(
+  var_percent = train_pca$eig[,"percentage of variance"],
+  PC = paste(
+    paste0("PC", 1:length(var_percent)),
+    paste0("(", round(var_percent, 1), "%)")
+  )
+)
+pca_filt_df <- dplyr::mutate(
+    dplyr::bind_rows(
+      dplyr::mutate(train_x, Location = train_y, Data = "Discovery"),
+      dplyr::mutate(test_x, Location = test_y, Data = "Prospective")
+    ),
+    Data = factor(
+      Data,
+      levels = c("Discovery","Prospective")
+    )
+  )
+plt <- ggplot(
+
+)+
+  geom_point(
+    data = pca_filt_df,
+    mapping = aes(Dim.1, Dim.2, colour = Data, shape = Location)
+  )+
+  xlab(pca_df$PC[1])+ylab(pca_df$PC[2])+
+  geom_hline(yintercept = 0, colour = "gray", linetype = "dashed")+
+  geom_vline(xintercept = 0, colour = "gray", linetype = "dashed")+
+  annotate("segment", x=-Inf, xend=Inf, y=-Inf, yend=-Inf)+
+  annotate("segment", x=-Inf, xend=-Inf, y=-Inf, yend=Inf)+
+  annotate("segment", x=Inf, xend=-Inf, y=Inf, yend=Inf)+
+  annotate("segment", x=Inf, xend=Inf, y=Inf, yend=-Inf)+
+  scale_fill_manual(values = c("#ff4d4d", "#0099ff"))+
+  scale_colour_manual(values = c("#ff4d4d", "#0099ff"))
+  
+# Save the plot.
+cowplot::save_plot(
+  file.path("Results", "PCA_Normalized_For_KNN.tiff"),
+  plt,
+  base_width = 6.5, base_height = 4
+)
+
+# Display the plot.
+plt
+```
+
+
+The variance within each principal component explained by each gene was visualized as a heatmap.
+
+
+```{r message=FALSE, warning=FALSE, fig.width=5.5, fig.height=4}
+pca_df_plt_train <- train_pca$var$contrib %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("Gene") %>%
+  tidyr::gather("PC", "Variance Explained (%)", -Gene) %>%
+  dplyr::mutate(
+    PC = gsub("Dim.","",PC)
+  ) %>%
+  dplyr::mutate(
+    Gene = factor(Gene, levels = rev(sort(unique(Gene)))),
+    PC = factor(
+      PC, levels = 1:length(unique(PC)), labels = 1:length(unique(PC))
+    )
+  )
+pcs <- sort(unique(pca_df_plt_train$PC))
+for(i in 1:length(pcs)){
+  pc_name <- pcs[i]
+  pca_df_plt_train$`Variance Explained (%)`[
+    pca_df_plt_train$PC == pc_name
+  ] <- pca_df_plt_train$`Variance Explained (%)`[
+    pca_df_plt_train$PC == pc_name]*train_pca$eig[
+      paste0("comp ", i),"percentage of variance"
+    ]/100
+}
+
+# Plot the variance explained as a heatmap.
+plt <- ggplot(
+  pca_df_plt_train,
+  aes(PC, Gene, fill = `Variance Explained (%)`)
+)+
+  geom_tile(colour = "black")+
+  scale_fill_continuous(low = "white", high = "red", limits = c(0,10))+
+  scale_x_discrete(position = "top", expand = c(0,0))+
+  scale_y_discrete(expand = c(0,0))+
+  annotate("segment", x=-Inf, xend=Inf, y=-Inf, yend=-Inf)+
+  annotate("segment", x=-Inf, xend=-Inf, y=-Inf, yend=Inf)+
+  annotate("segment", x=Inf, xend=-Inf, y=Inf, yend=Inf)+
+  annotate("segment", x=Inf, xend=Inf, y=Inf, yend=-Inf)+
+  labs(fill = "Variance\nExplained (%)")+
+  theme(
+    axis.title.y = element_blank()
+  )+
+  xlab("Principal Component")
+
+# Save the plot.
+cowplot::save_plot(
+  file.path("Results","Discovery_PCA_Variance_Heatmap.tiff"),
+  plt,
+  base_width = 5.5, base_height = 4
+)
+
+# Display the plot.
+plt
+```
+
+
+A scree plot was generated from the PCA results.
+
+
+```{r message=FALSE, warning=FALSE, fig.width=6.5, fig.height=4}
+pca_df <- train_pca$eig[,"percentage of variance", drop = FALSE] %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("PC") %>%
+  dplyr::mutate(
+      PC = gsub("comp ","",PC)
+  ) %>%
+  dplyr::mutate(PC = factor(PC, levels = 1:length(PC))) %>%
+  dplyr::rename(var_percent = "percentage of variance")
+
+plt <- ggplot(
+  dplyr::mutate(pca_df, PC = 1:dplyr::n()),
+  aes(PC, var_percent)
+)+
+  geom_point()+
+  geom_line(colour = "red")+
+  scale_y_continuous(
+    limits = c(0,100),
+    expand = c(0,0)
+  )+
+  scale_x_continuous(breaks = 1:16)+
+  xlab("Principal Component")+ylab("Variance Explained (%)")+
+  annotate("segment", x=-Inf, xend=Inf, y=-Inf, yend=-Inf)+
+  annotate("segment", x=-Inf, xend=-Inf, y=-Inf, yend=Inf)+
+  annotate("segment", x=Inf, xend=-Inf, y=Inf, yend=Inf)+
+  annotate("segment", x=Inf, xend=Inf, y=Inf, yend=-Inf)
+
+# Save the plot.
+cowplot::save_plot(
+  file.path("Results", "Scree_Plot_Normalized_KNN.tiff"),
+  plt,
+  base_width = 6.5, base_height = 4
+)
+
+# Display the plot.
+plt
+```
+
+
+The predictive modeling algorithm used was k nearest neighbors.
+
+
+```{r message=FALSE, warning=FALSE}
+train_output <- tibble::data_frame()
+test_output <- tibble::data_frame()
+train_y <- factor(train_y, levels = c("AIUP", "ECT"))
+test_y <- factor(test_y, levels = c("AIUP", "ECT"))
+for(k in 1:5){
+  for(i in 1:nrow(train_x)){
+    new_train_x <- train_x[-i,]
+    new_train_y <- train_y[-i]
+    predictions_train <- class::knn(
+      train = new_train_x,
+      test = train_x[i,,drop=FALSE],
+      cl = train_y[-i],
+      k = k,
+      prob = TRUE
+    )
+    prob_train <- attr(predictions_train, "prob")
+    prob_train[predictions_train == "AIUP"] <- 1 - prob_train[
+      predictions_train == "AIUP"
+    ]
+    train_output_new <- tibble::data_frame(
+      SampleName = rownames(train_x)[i],
+      Group = train_y[i],
+      PredictedGroup = predictions_train,
+      PredictionProbability = prob_train,
+      k = k
+    )
+    train_output <- dplyr::bind_rows(
+      train_output,
+      train_output_new
+    )
+    predictions_test <- class::knn(
+      train = train_x,
+      test = test_x,
+      cl = train_y,
+      k = k,
+      prob = TRUE
+    )
+    prob_test <- attr(predictions_test, "prob")
+    prob_test[predictions_test == "AIUP"] <- 1 - prob_test[
+      predictions_test == "AIUP"
+    ]
+    test_output_new <- tibble::data_frame(
+      Iteration = i,
+      Group = test_y,
+      PredictedGroup = predictions_test,
+      PredictionProbability = prob_test,
+      k = k
+    )
+    test_output <- dplyr::bind_rows(
+      test_output,
+      test_output_new
+    )
+  }
+}
+
+f1_score <- function(tp, fn, fp){
+  tp/(tp+fn+fp)
+}
+k_metrics <- dplyr::group_by(train_output, k) %>%
+  dplyr::summarise(
+    accuracy = mean(Group == PredictedGroup),
+    f1_score = f1_score(
+      sum((Group == "ECT") & (PredictedGroup == "ECT")),
+      sum((Group == "ECT") & (PredictedGroup == "AIUP")),
+      sum((Group == "AIUP") & (PredictedGroup == "ECT"))
+    )
+  )
+
+# Save the k metrics.
+writexl::write_xlsx(
+  k_metrics, file.path("Results", "k_metrics.xlsx")
+)
+
+# Display the metrics related to different k values.
+knitr::kable(k_metrics)
+```
+
+
+Accuracy on the discovery data was plotted as a function of k.
+
+
+```{r message=FALSE, warning=FALSE, fig.width=4, fig.height=4}
+plt <- ggplot(
+  dplyr::mutate(k_metrics, GROUP = 1),
+  aes(k, accuracy*100, group = GROUP)
+)+
+  geom_line(
+    colour = "red"
+  )+
+  geom_point()+
+  annotate("segment", x=-Inf, xend=Inf, y=-Inf, yend=-Inf)+
+  annotate("segment", x=-Inf, xend=-Inf, y=-Inf, yend=Inf)+
+  annotate("segment", x=Inf, xend=-Inf, y=Inf, yend=Inf)+
+  annotate("segment", x=Inf, xend=Inf, y=Inf, yend=-Inf)+
+  coord_cartesian(ylim = c(0,100))+
+  scale_y_continuous(
+    expand = expand_scale(
+      mult = c(0,0),
+      add = c(0,0)
+    )
+  )+
+  ylab("Accuracy (%)")
+
+# Save the plot.
+cowplot::save_plot(
+  file.path("Results","k_selection.tiff"),
+  plt,
+  base_width = 4, base_height = 4
+)
+
+# Display the plot.
+plt
+```
+
+
+
+Based on the above plot, the optimal k was 3.
+
+
+```{r message=FALSE, warning=FALSE, fig.width=4, fig.height=4}
+optimal_k <- 3
+
+train_output <- dplyr::filter(train_output, k == optimal_k)
+test_output <- dplyr::filter(test_output, k == optimal_k)
+train_unique_probs <- sort(unique(c(train_output$PredictionProbability, 0, 1)))
+train_auc_tbl <- tibble::data_frame()
+for(prob in train_unique_probs){
+  preds <- ifelse(train_output$PredictionProbability >= prob, "ECT", "AIUP")
+  preds <- preds == "ECT"
+  actual <- train_output$Group == "ECT"
+  tp <- sum(preds & actual)
+  tn <- sum(!preds & !actual)
+  fp <- sum(preds & !actual)
+  fn <- sum(!preds & actual)
+  sensitivity <- tp/(tp+fn)
+  specificity <- tn/(tn+fp)
+  accuracy <- mean(preds == actual)
+  new_out <- tibble::data_frame(
+    tp = tp, tn = tn, fp = fp, fn = fn,
+    sensitivity = sensitivity, specificity = specificity, fpr = 1-specificity,
+    accuracy = accuracy, threshold = prob
+  )
+  train_auc_tbl <- dplyr::bind_rows(train_auc_tbl, new_out)
+}
+train_auc_tbl <- train_auc_tbl[nrow(train_auc_tbl):1,]
+
+
+train_auc_df <- tibble::data_frame()
+for(i in 1:nrow(train_auc_tbl)){
+  if(i == 1){
+    train_auc_df <- train_auc_tbl[1,]
+    train_auc_df <- dplyr::mutate(
+      train_auc_df,
+      lb = 0, rb = fpr[1]
+    )
+    next
+  }
+  new_row <- train_auc_tbl[i,] %>%
+    dplyr::mutate(
+      .,
+      lb = train_auc_tbl$fpr[i-1], rb = train_auc_tbl$fpr[i]
+    )
+  train_auc_df <- dplyr::bind_rows(train_auc_df, new_row)
+}
+
+train_auc_df <- dplyr::bind_rows(
+  tibble::data_frame(
+    sensitivity = c(0),
+    fpr = c(0)
+  ),
+  train_auc_df,
+  tibble::data_frame(
+    sensitivity = c(1),
+    fpr = c(1)
+  )
+) %>%
+  dplyr::mutate(., area = 0)
+for(i in 2:nrow(train_auc_df)){
+  area_triangle <- (
+    train_auc_df$sensitivity[i]-train_auc_df$sensitivity[i-1]
+  )*0.5*(train_auc_df$fpr[i]-train_auc_df$fpr[i-1])
+  area_rectangle <- min(c(
+    train_auc_df$sensitivity[i],train_auc_df$sensitivity[i-1]
+  ))*(train_auc_df$fpr[i]-train_auc_df$fpr[i-1])
+  area <- area_rectangle + area_triangle
+  train_auc_df$area[i] <- area
+}
+train_auc <- sum(train_auc_df$area)
+
+plt <- ggplot(
+  train_auc_df,
+  aes(fpr, sensitivity)
+)+
+  geom_point()+
+  geom_line()+
+  geom_abline(intercept = 0, slope = 1, colour = "black", linetype = "dashed")+
+  coord_equal(xlim = c(0,1), ylim = c(0,1), expand = TRUE)+
+  xlab("False Positive Rate")+ylab("True Positive Rate")
+
+cowplot::save_plot(
+  file.path("Results","Train_Model.tiff"),
+  plt,
+  base_width = 4, base_height = 4
+)
+
+plt
+
+train_fscores <- train_auc_tbl$tp/(
+  train_auc_tbl$tp + train_auc_tbl$fn + train_auc_tbl$fp
+)
+train_best_row <- train_auc_tbl[which.max(train_fscores),]
+train_best_row <- dplyr::mutate(train_best_row, auc = train_auc)
+optimum_threshold <- train_best_row$threshold
+
+writexl::write_xlsx(
+  train_best_row,
+  file.path("Results","Train_Model.xlsx")
+)
+
+knitr::kable(train_best_row)
+```
+
+
+The model was next evaluated on the prospective data.
+
+
+```{r message=FALSE, warning=FALSE, fig.width=4, fig.height=4}
+# Evaluate testing results.
+test_results <- lapply(
+  split(test_output, factor(test_output$Iteration)),
+  function(x){
+    test_unique_probs <- train_unique_probs
+    test_auc_tbl <- tibble::data_frame()
+    for(prob in test_unique_probs){
+      preds <- ifelse(
+        x$PredictionProbability >= prob, "ECT", "AIUP"
+      )
+      preds <- preds == "ECT"
+      actual <- x$Group == "ECT"
+      tp <- sum(preds & actual)
+      tn <- sum(!preds & !actual)
+      fp <- sum(preds & !actual)
+      fn <- sum(!preds & actual)
+      sensitivity <- tp/(tp+fn)
+      specificity <- tn/(tn+fp)
+      accuracy <- mean(preds == actual)
+      new_out <- tibble::data_frame(
+        tp = tp, tn = tn, fp = fp, fn = fn,
+        sensitivity = sensitivity, specificity = specificity,
+        fpr = 1-specificity,
+        accuracy = accuracy, threshold = prob
+      )
+      test_auc_tbl <- dplyr::bind_rows(test_auc_tbl, new_out)
+    }
+    test_auc_tbl <- test_auc_tbl[nrow(test_auc_tbl):1,]
+    
+    
+    test_auc_df <- tibble::data_frame()
+    for(i in 1:nrow(test_auc_tbl)){
+      if(i == 1){
+        test_auc_df <- test_auc_tbl[1,]
+        test_auc_df <- dplyr::mutate(
+          test_auc_df,
+          lb = 0, rb = fpr[1]
+        )
+        next
+      }
+      new_row <- test_auc_tbl[i,] %>%
+        dplyr::mutate(
+          .,
+          lb = test_auc_tbl$fpr[i-1], rb = test_auc_tbl$fpr[i]
+        )
+      test_auc_df <- dplyr::bind_rows(test_auc_df, new_row)
+    }
+    # test_auc_df <- dplyr::mutate(test_auc_df, area = (rb-lb)*sensitivity)
+    # test_auc <- sum(test_auc_df$area)
+    test_auc_df <- dplyr::bind_rows(
+      tibble::data_frame(
+        sensitivity = c(0),
+        fpr = c(0)
+      ),
+      test_auc_df,
+      tibble::data_frame(
+        sensitivity = c(1),
+        fpr = c(1)
+      )
+    ) %>%
+      dplyr::mutate(., Iteration = x$Iteration[1], area = 0)
+    for(i in 2:nrow(test_auc_df)){
+      area_triangle <- (
+        test_auc_df$sensitivity[i]-test_auc_df$sensitivity[i-1]
+      )*0.5*(test_auc_df$fpr[i]-test_auc_df$fpr[i-1])
+      area_rectangle <- min(c(
+        test_auc_df$sensitivity[i],test_auc_df$sensitivity[i-1]
+      ))*(test_auc_df$fpr[i]-test_auc_df$fpr[i-1])
+      area <- area_rectangle + area_triangle
+      test_auc_df$area[i] <- area
+    }
+    
+    test_auc_df <- tidyr::drop_na(test_auc_df)
+      
+    
+    return(test_auc_df)
+  }
+) %>%
+  dplyr::bind_rows()
+
+test_auc <- dplyr::group_by(test_results, Iteration) %>%
+  dplyr::summarise(., auc = sum(area)) %>%
+  dplyr::ungroup()
+
+test_results_out <- dplyr::filter(
+  test_results,
+  threshold == optimum_threshold
+) %>%
+  dplyr::inner_join(
+    ., test_auc,
+    by = "Iteration"
+  )
+
+plt_df_test <- dplyr::bind_rows(
+  tibble::data_frame(fpr = 0, sensitivity = 0, Iteration = 1),
+  tidyr::drop_na(test_results)
+)
+plt <- ggplot(
+  plt_df_test,
+  aes(fpr, sensitivity, group = factor(Iteration))
+)+
+  geom_point()+
+  geom_line()+
+  geom_abline(intercept = 0, slope = 1, colour = "black", linetype = "dashed")+
+  coord_equal(xlim = c(0,1), ylim = c(0,1), expand = TRUE)+
+  xlab("False Positive Rate")+ylab("True Positive Rate")
+
+cowplot::save_plot(
+  file.path("Results","Test_Model.tiff"),
+  plt,
+  base_width = 4, base_height = 4
+)
+
+plt
+
+writexl::write_xlsx(
+  test_results_out,
+  file.path("Results","Test_Model.xlsx")
+)
+
+knitr::kable(test_results_out)
+
+test_summary <- dplyr::select(
+  test_results_out,
+  -lb, -rb, -Iteration, -area, -threshold
+) %>%
+  dplyr::summarise_all(., mean)
+
+writexl::write_xlsx(
+  test_summary,
+  file.path("Results","Test_Model_Summary.xlsx")
+)
+
+knitr::kable(test_summary)
+```
+
+
+All of the ROC curves were also merged into one figure.
+
+
+```{r message=FALSE, warning=FALSE, fig.width=4, fig.height=4}
+train_output_ <- dplyr::mutate(
+  train_output,
+  Group = factor(as.numeric(Group)-1, levels = c(0,1)),
+  PredictedGroup = factor(as.numeric(PredictedGroup)-1, levels = c(0,1))
+)
+test_output_ <- dplyr::mutate(
+  test_output,
+  Group = factor(as.numeric(Group)-1, levels = c(0,1)),
+  PredictedGroup = factor(as.numeric(PredictedGroup)-1, levels = c(0,1))
+)
+
+# Retrieve the sensitivity and specificity values.
+get_s_and_s <- function(df, data_set){
+  df_pred <- ROCR::prediction(
+    as.numeric(as.character(df$PredictionProbability)),
+    as.numeric(as.character(df$Group))
+  )
+  df_pred_dat <- ROCR::performance(
+    df_pred, "tpr", "fpr"
+  )
+  df_pred_df <- tibble::data_frame(
+    `False positive rate` = df_pred_dat@x.values %>% unlist(),
+    `True positive rate` = df_pred_dat@y.values %>% unlist(),
+    data_set = data_set
+  )
+  return(df_pred_df)
+}
+ss_train <- get_s_and_s(train_output_, "Train")
+ss_test <- get_s_and_s(test_output_, "Test")
+
+ss_df <- dplyr::bind_rows(ss_train, ss_test) %>%
+  dplyr::mutate(data_set = factor(
+      data_set,
+      levels = c("Train","Test","Control"),
+      labels = c("Discovery","Prospective","Control")
+    )
+  )
+
+# Plot the curve.
+plt <- ggplot(
+  ss_df,
+  aes(`False positive rate`, `True positive rate`, colour = data_set)
+)+
+  geom_point()+
+  geom_line(alpha = 0.3, size = 1.2)+
+  coord_cartesian(xlim = c(0,1), ylim = c(0,1), expand = c(0,0))+
+  geom_abline(slope = 1, intercept = 0, col = "black", linetype = "dashed")+
+  coord_equal()+
+  theme(legend.title = element_blank(), legend.position = c(0.55,0.15))+
+  xlab("False Positive Rate")+ylab("True Positive Rate")+
+  annotate("segment", x=-Inf, xend=Inf, y=-Inf, yend=-Inf)+
+  annotate("segment", x=-Inf, xend=-Inf, y=-Inf, yend=Inf)+
+  annotate("segment", x=Inf, xend=-Inf, y=Inf, yend=Inf)+
+  annotate("segment", x=Inf, xend=Inf, y=Inf, yend=-Inf)+
+  scale_fill_manual(values = c("#ff4d4d", "#0099ff", "#009933"))+
+  scale_colour_manual(values = c("#ff4d4d", "#0099ff", "#009933"))
+
+# Save the plot.
+cowplot::save_plot(
+  file.path("Results", "ROC_All.tiff"),
+  plt,
+  base_width = 4, base_height = 4
+)
+
+# Display the plot
+plt
+```
+
+
+Confidence intervals for metrics related to the curves were computed below.
+```{r message=FALSE, warning=FALSE}
+# Create the curves.
+roc_train <- pROC::roc(
+  as.numeric(train_output$Group)-1, train_output$PredictionProbability
+)
+roc_test <- pROC::roc(
+  as.numeric(test_output$Group)-1, test_output$PredictionProbability
+)
+
+# Calculate the difference between curves.
+difference_between_curves <- pROC::roc.test(roc_train, roc_test)$p.value
+difference_between_curves <- tibble::data_frame(
+  Curve_1 = "Discovery",
+  Curve_2 = "Prospective",
+  p.value = difference_between_curves
+)
+writexl::write_xlsx(
+  difference_between_curves,
+  file.path("Results", "AUC_Differences.xlsx")
+)
+
+get_roc_data <- function(roc_obj, curve_name){
+  # Calculate CIs.
+  roc_obj_auc <- pROC::ci(
+    roc_obj, of = "auc", method = "bootstrap", progress = "none"
+  )
+  roc_obj_spse <- pROC::ci.thresholds(
+    roc_obj, thresholds = 0.5, progress = "none"
+  )
+  
+  # Assemble output.
+  auc_out <- tibble::data_frame(
+    Curve = curve_name,
+    AUC = roc_obj$auc,
+    AUC_low = roc_obj_auc[1],
+    AUC_high = roc_obj_auc[2],
+    specificity = roc_obj_spse$specificity[2],
+    specificity_low = roc_obj_spse$specificity[1],
+    specificity_high = roc_obj_spse$specificity[3],
+    sensitivity = roc_obj_spse$sensitivity[2],
+    sensitivity_low = roc_obj_spse$sensitivity[1],
+    sensitivity_high = roc_obj_spse$sensitivity[3]
+  )
+  
+  # Return the output.
+  return(auc_out)
+}
+
+roc_data <- dplyr::bind_rows(
+  get_roc_data(roc_train, "Discovery"),
+  get_roc_data(roc_test, "Prospective")
+)
+
+writexl::write_xlsx(
+  roc_data,
+  file.path("Results", "ROC_Data.xlsx")
+)
+```
+
+
+Finally, the normalized data was saved.
+```{r message=FALSE, warning=FALSE}
+# Reformat the output.
+raw_out <- dplyr::filter(
+  raw_df,
+  Data != "Control",
+  Class == "Endogenous"
+) %>%
+  dplyr::mutate(
+    Data = factor(
+      Data,
+      levels = c("Train","Test"),
+      labels = c("Discovery", "Prospective")
+    ),
+    Source = "nCounter"
+  ) %>%
+  dplyr::rename(
+    Gene = "Probe Name",
+    Expression = "NormCount",
+    Sample = "SampleName",
+    Label = "Type"
+  ) %>%
+  dplyr::select(
+    Sample, Label, Data, Gene, Expression, Source
+  )
+
+# Save the formatted output.
+writexl::write_xlsx(
+  raw_out,
+  file.path("Results", "nCounter_Normalized_Data.xlsx")
+)
+```
+
+
+End of analysis.

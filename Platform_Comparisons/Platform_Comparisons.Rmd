@@ -1,0 +1,254 @@
+---
+title: "Platform Comparisons"
+always_allow_html: yes
+output:
+  html_document:
+    code_folding: hide
+    number_sections: yes
+    toc: yes
+    toc_depth: 5
+    theme: united
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Overview
+The expression levels measured by the three platforms (microarray, nCounter, and qPCR) were compared.
+
+
+# Prepare the environment
+```{r message=FALSE, warning=FALSE}
+# Load packages.
+library(magrittr) # Pipe operator.
+library(cowplot) # Plotting.
+library(ggpubr) # Plotting.
+
+# Create the Results folder.
+if(dir.exists("Results")){
+  unlink("Results", recursive = TRUE, force = TRUE)
+}
+dir.create("Results")
+```
+
+
+# Prepare the data
+```{r message=FALSE, warning=FALSE}
+# Define data file paths.
+files <- file.path("Data", list.files("Data"))
+
+# Load the data.
+df <- lapply(
+  files,
+  function(input_file){
+    readxl::read_excel(input_file)
+  }
+) %>%
+  dplyr::bind_rows() %>%
+  dplyr::mutate(
+    Label = factor(Label, levels = c("AIUP","ECT")),
+    Data = factor(Data, levels = c("Discovery","Prospective")),
+    Source = factor(Source, levels = c("Microarray","qPCR","nCounter"))
+  ) %>%
+  dplyr::filter(
+    Gene %in% unique(Gene[Source == "Microarray"])
+  ) %>%
+  tidyr::spread(Source, Expression)
+```
+
+
+# Determine correlations
+```{r message=FALSE, warning=FALSE}
+cors <- tibble::data_frame(
+  A = c("Microarray", "Microarray", "qPCR"),
+  B = c("qPCR", "nCounter", "nCounter"),
+  spearman = c(
+    cor(df$Microarray, df$qPCR, method = "spearman", use = "p"),
+    cor(df$Microarray, df$nCounter, method = "spearman", use = "p"),
+    cor(df$qPCR, df$nCounter, method = "spearman", use = "p")
+  ),
+  p.value = c(
+    cor.test(
+      df$Microarray, df$qPCR, method = "spearman", use = "p", exact = TRUE, 
+      continuity = TRUE
+    )$p.value,
+    cor.test(
+      df$Microarray, df$nCounter, method = "spearman", use = "p", exact = TRUE,
+      continuity = TRUE
+    )$p.value,
+    cor.test(
+      df$qPCR, df$nCounter, method = "spearman", use = "p", exact = TRUE, 
+      continuity = TRUE
+    )$p.value
+  )
+)
+cors$p.value <- ifelse(cors$p.value == 0, "<10e-16", cors$p.value)
+writexl::write_xlsx(
+  cors,
+  file.path("Results", "Correlations.xlsx")
+)
+```
+
+
+# Plot the data
+Microarray versus qPCR
+```{r message=FALSE, warning=FALSE, fig.width=6.5, fig.height=9}
+plt <- ggplot(
+  dplyr::filter(df, Gene != "LPAR3") %>% tidyr::drop_na(),
+  aes(Microarray, qPCR, colour = Label)
+)+
+  geom_point()+
+  geom_smooth(method = "lm", se = FALSE, colour = "gray")+
+  scale_y_continuous(
+    expand = expand_scale(
+      mult = c(0,0.3),
+      add = c(0,0)
+    ),
+    limits = c(0,NA)
+  )+
+  scale_x_continuous(
+    expand = expand_scale(
+      mult = c(0,0.3),
+      add = c(0,0)
+    ),
+    limits = c(0,NA)
+  )+
+  facet_wrap(~Gene, nrow = 4, scales = "free")+
+  xlab("Relative Expression by Microarray")+
+  ylab("Relative Expression by qPCR")+
+  annotate("segment", x=-Inf, xend=Inf, y=-Inf, yend=-Inf)+
+  annotate("segment", x=-Inf, xend=-Inf, y=-Inf, yend=Inf)+
+  annotate("segment", x=Inf, xend=-Inf, y=Inf, yend=Inf)+
+  annotate("segment", x=Inf, xend=Inf, y=Inf, yend=-Inf)+
+  scale_fill_manual(values = c("#ff4d4d", "#0099ff"))+
+  scale_colour_manual(values = c("#ff4d4d", "#0099ff"))+
+  theme(
+    strip.background = element_blank(),
+    panel.spacing = unit(1, "lines"),
+    legend.title = element_blank(),
+    legend.position = c(0.75,0.1)
+  )+
+  stat_cor(
+    aes(group = "AllData"),
+    method = "spearman",
+    label.x = 0, show.legend = FALSE, size = 3
+  )
+  
+cowplot::save_plot(
+  file.path("Results","Correlation_Microarray_qPCR.tiff"),
+  plt,
+  base_width = 6.5, base_height = 9
+)
+
+plt
+```
+
+
+Microarray versus nCounter
+```{r message=FALSE, warning=FALSE, fig.width=6.5, fig.height=9}
+plt <- ggplot(
+  dplyr::filter(df) %>% tidyr::drop_na(),
+  aes(Microarray, nCounter, colour = Label)
+)+
+  geom_point()+
+  geom_smooth(method = "lm", se = FALSE, colour = "gray")+
+  scale_y_continuous(
+    expand = expand_scale(
+      mult = c(0,0.3),
+      add = c(0,0)
+    ),
+    limits = c(0,NA)
+  )+
+  scale_x_continuous(
+    expand = expand_scale(
+      mult = c(0,0.3),
+      add = c(0,0)
+    ),
+    limits = c(0,NA)
+  )+
+  facet_wrap(~Gene, nrow = 4, scales = "free")+
+  xlab("Relative Expression by Microarray")+
+  ylab("Relative Expression by nCounter")+
+  annotate("segment", x=-Inf, xend=Inf, y=-Inf, yend=-Inf)+
+  annotate("segment", x=-Inf, xend=-Inf, y=-Inf, yend=Inf)+
+  annotate("segment", x=Inf, xend=-Inf, y=Inf, yend=Inf)+
+  annotate("segment", x=Inf, xend=Inf, y=Inf, yend=-Inf)+
+  scale_fill_manual(values = c("#ff4d4d", "#0099ff"))+
+  scale_colour_manual(values = c("#ff4d4d", "#0099ff"))+
+  theme(
+    strip.background = element_blank(),
+    panel.spacing = unit(1, "lines"),
+    legend.title = element_blank(),
+    legend.position = c(0.75,0.1)
+  )+
+  stat_cor(
+    aes(group = "AllData"),
+    method = "spearman",
+    label.x = 0, show.legend = FALSE, size = 3
+  )
+  
+cowplot::save_plot(
+  file.path("Results","Correlation_Microarray_nCounter.tiff"),
+  plt,
+  base_width = 6.5, base_height = 9
+)
+
+plt
+```
+
+
+qPCR versus nCounter
+```{r message=FALSE, warning=FALSE, fig.width=6.5, fig.height=9}
+plt <- ggplot(
+  dplyr::filter(df, Gene != "LPAR3") %>% tidyr::drop_na(),
+  aes(qPCR, nCounter, colour = Label)
+)+
+  geom_point()+
+  geom_smooth(method = "lm", se = FALSE, colour = "gray")+
+  scale_y_continuous(
+    expand = expand_scale(
+      mult = c(0,0.3),
+      add = c(0,0)
+    ),
+    limits = c(0,NA)
+  )+
+  scale_x_continuous(
+    expand = expand_scale(
+      mult = c(0,0.3),
+      add = c(0,0)
+    ),
+    limits = c(0,NA)
+  )+
+  facet_wrap(~Gene, nrow = 4, scales = "free")+
+  xlab("Relative Expression by qPCR")+
+  ylab("Relative Expression by nCounter")+
+  annotate("segment", x=-Inf, xend=Inf, y=-Inf, yend=-Inf)+
+  annotate("segment", x=-Inf, xend=-Inf, y=-Inf, yend=Inf)+
+  annotate("segment", x=Inf, xend=-Inf, y=Inf, yend=Inf)+
+  annotate("segment", x=Inf, xend=Inf, y=Inf, yend=-Inf)+
+  scale_fill_manual(values = c("#ff4d4d", "#0099ff"))+
+  scale_colour_manual(values = c("#ff4d4d", "#0099ff"))+
+  theme(
+    strip.background = element_blank(),
+    panel.spacing = unit(1, "lines"),
+    legend.title = element_blank(),
+    legend.position = c(0.75,0.1)
+  )+
+  stat_cor(
+    aes(group = "AllData"),
+    method = "spearman",
+    label.x = 0, show.legend = FALSE, size = 3
+  )
+  
+cowplot::save_plot(
+  file.path("Results","Correlation_qPCR_nCounter.tiff"),
+  plt,
+  base_width = 6.5, base_height = 9
+)
+
+plt
+```
+
+
+End of analysis
