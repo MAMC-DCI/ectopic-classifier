@@ -26,3 +26,15 @@ Start the Docker image used for this analysis (see the upper level README to see
 
 
 The step-by-step description of the analysis is contained in *nCounter_Analysis.html*. All tables and figures included in *nCounter_Analysis.html*, plus many additional ones, are stored in the *Results* folder.
+
+
+# Methods
+
+
+50 ng of RNA was loaded per sample and assayed using an nCounter SPRINT Profiler running nSolver 4.0 Analysis Software. Probes targeting 60S ribosomal protein L19 (RPL19), Beta-ᴅ-glucuronidase (GUSB), and phosphoglycerate kinase 1 (PGK1) were included for use as loading controls. These genes were selected based on previously published data for endometrial housekeeping genes and their widespread use on the nCounter platform (26). Based on the global expression levels of the genes being assayed, as described in the Human Protein Atlas (HPA, version 18.1, www.proteinatlas.org), samples from additional tissues (liver (Cat. #636531, Takara Bio, USA), lung (Cat. #636524, Takara Bio, USA), and adipose (Cat. #636558, Takara Bio, USA)) were run in each assay to serve as positive and negative controls (27).
+
+
+One-tailed Wilcoxon rank-sum tests were performed on normalized data, testing whether classifier gene expression was elevated in ECT samples. both data files and the reporter library file were loaded into nSolver Analysis Software (version 4.0.70). Data were processed using the software’s defaults. Briefly, gene counts were normalized on a per sample basis by dividing each sample’s counts by the geometric mean of the counts of its housekeeping genes (GUSB, PGK1, and RPL19).
+
+
+Predictive models were trained using the same methods used for Microarray data. See that analysis for more details.

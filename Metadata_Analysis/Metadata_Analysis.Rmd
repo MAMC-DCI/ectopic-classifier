@@ -22,7 +22,9 @@ The levels of five metadata characteristics were evaluated (age, BMI, gravidity,
 ```{r message=FALSE, warning=FALSE}
 # Load packages.
 library(magrittr) # Pipe operator.
+library(ggplot2) # Plotting.
 library(cowplot) # Plotting.
+theme_set(theme_cowplot())
 library(ggpubr) # Plotting.
 library(ggpubr) # Significance in plots.
 
@@ -94,8 +96,7 @@ t_stats <- SimplifyStats::pairwise_stats(
 ) %>%
   dplyr::filter(
     A.Variable == B.Variable,
-    (A.Data == B.Data & A.Label == "AIUP" & B.Label == "ECT") |
-      (A.Data == "Discovery" & B.Data == "Prospective" & A.Label == B.Label)
+    (A.Data == B.Data & A.Label == "AIUP" & B.Label == "ECT")
   ) %>%
   tidyr::drop_na() %>%
   dplyr::group_by(A.Data, B.Data) %>%
@@ -119,26 +120,25 @@ knitr::kable(t_stats)
 
 
 # Plot the data
-```{r message=FALSE, warning=FALSE, fig.width=6.5, fig.height=6.5}
+```{r message=FALSE, warning=FALSE, fig.width=4.5, fig.height=6.5}
 plt <- ggplot()+# Initialize the plot object.
   geom_bar(# Add the bar layer.
-    data = dplyr::filter(df_summary, Data != "Horne lab"),
-    aes(Label, MEAN, fill = Data),
+    data = dplyr::filter(df_summary, Data != "External"),
+    aes(Label, MEAN),
     stat = "identity", position = "dodge",
     alpha = 0.5
   )+
   ggbeeswarm::geom_quasirandom(# Add a beeswarm plot overlay.
-    data = dplyr::filter(df, Data != "Horne lab"),
-    mapping = aes(Label, Measurement, colour = Data),
+    data = dplyr::filter(df, Data != "External"),
+    mapping = aes(Label, Measurement),
     dodge.width = 0.9
   )+
   geom_errorbar(# Add the errorbar layer next so that it appears on top.
-    data = dplyr::filter(df_summary, Data != "Horne lab"),
+    data = dplyr::filter(df_summary, Data != "External"),
     aes(
       x = Label,
       ymin = MEAN - SE,
-      ymax = MEAN + SE,
-      group = Data
+      ymax = MEAN + SE
     ),
     colour = "black", width = 0.1,
     position = position_dodge(width = 0.9)
@@ -167,7 +167,7 @@ plt <- ggplot()+# Initialize the plot object.
 cowplot::save_plot(
   file.path("Results", "MetadataFigure.tiff"),
   plt,
-  base_width = 6.5, base_height = 6.5
+  base_width = 4.5, base_height = 6.5
 )
 
 # Display the plot.

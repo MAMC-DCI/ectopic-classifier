@@ -28,3 +28,8 @@ Start the Docker image used for this analysis (see the upper level README to see
 
 
 The step-by-step description of the analysis is contained in *Platform_Comparisons.html*. All tables and figures included in *Platform_Comparisons.html* are stored in the *Results* folder.
+
+
+# Methods
+
+The data files described above were loaded and Spearman's correlations between sample-wise expression levels were calculated.

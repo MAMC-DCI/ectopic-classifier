@@ -1,0 +1,210 @@
+---
+title: "Metadata Analysis"
+always_allow_html: yes
+output:
+  html_document:
+    code_folding: hide
+    number_sections: yes
+    toc: yes
+    toc_depth: 5
+    theme: united
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Overview
+The expression levels from all platforms are plotted in a single figure here.
+
+
+# Prepare the environment
+```{r message=FALSE, warning=FALSE}
+# Load packages.
+library(magrittr) # Pipe operator.
+library(ggplot2) # Plotting.
+library(cowplot) # Plotting.
+theme_set(theme_cowplot())
+
+# Create the Results folder.
+if(dir.exists("Results")){
+  unlink("Results", recursive = TRUE, force = TRUE)
+}
+dir.create("Results")
+```
+
+
+# Prepare the data
+```{r message=FALSE, warning=FALSE}
+df <- dplyr::bind_rows(
+  readxl::read_excel(file.path(
+    "Data","Microarray_Normalized_Data.xlsx"
+  )) %>%
+    dplyr::mutate(Data_Source = "Internal"),
+  readxl::read_excel(file.path(
+    "Data","Microarray_Normalized_Data_External.xlsx"
+  )) %>%
+    dplyr::mutate(Data_Source = "External"),
+  readxl::read_excel(file.path(
+    "Data","nCounter_Normalized_Data.xlsx"
+  )) %>%
+    dplyr::mutate(Data_Source = "Internal"),
+  readxl::read_excel(file.path(
+    "Data","qPCR_Normalized_Data.xlsx"
+  )) %>%
+    dplyr::mutate(Data_Source = "Internal")
+) %>%
+  dplyr::mutate(
+    Label = factor(Label),
+    Gene = factor(Gene),
+    Source = factor(Source),
+    Data_Source = factor(Data_Source, levels = c("Internal","External"))
+  ) %>%
+  split(
+    .,
+    f = paste0(.$Gene, " --- ", .$Source, "---", .$Data_Source)
+  ) %>%
+  lapply(
+    .,
+    function(i){
+      if(as.character(i$Source[1L]) == "nCounter"){
+        i$Expression <- 2^i$Expression
+      }
+      i %>%
+        dplyr::mutate(
+          Expression = Expression/mean(Expression[Label == "AIUP"])
+        ) %>%
+        dplyr::mutate(
+          Expression = log2(Expression)
+        )
+    }
+  ) %>%
+  dplyr::bind_rows()
+  
+
+# Summarize the data.
+df_summary <- dplyr::group_by(
+  df,
+  Label, Gene, Source, Data_Source
+) %>%
+  dplyr::summarise(
+    N = dplyr::n(),
+    MEAN = log2(mean(2^Expression, na.rm = TRUE)),
+    SD = log2(sd(2^Expression, na.rm = TRUE)),
+    SE = ifelse(N == 1, NA, SD/sqrt(N-1)),
+    CI_low = qnorm(0.05, MEAN, SD),
+    CI_high = qnorm(0.95, MEAN, SD)
+  ) %>%
+  dplyr::ungroup()
+
+# Save the summarized data.
+writexl::write_xlsx(
+  df_summary,
+  file.path("Results", "SummarizedData.xlsx")
+)
+```
+
+
+# Perform statistics
+
+
+```{r message=FALSE, warning=FALSE}
+wilcox_stats <- SimplifyStats::pairwise_stats(
+  df,
+  group_cols = c("Label", "Gene", "Source", "Data_Source"),
+  var_cols = "Expression",
+  fxn = wilcox.test,
+  two_way = TRUE
+) %>%
+  dplyr::filter(
+    (A.Label == "AIUP" & B.Label == "ECT") & 
+      (A.Gene == B.Gene) &
+      (A.Source == B.Source) &
+      (A.Data_Source == B.Data_Source)
+  ) %>%
+  tidyr::drop_na() %>%
+  dplyr::select(
+    -statistic, -method, -alternative
+  ) %>%
+  split(., f = paste0(.$Gene, "---", .$Source, "---", .$Data_Source)) %>%
+  lapply(
+    .,
+    function(i){
+      i$FDR <- p.adjust(i$p.value, method = "fdr")
+      return(i)
+    }
+  ) %>%
+  dplyr::bind_rows() %>%
+  dplyr::rename(
+    Gene = "A.Gene",
+    Source = "A.Source",
+    Data_Source = "A.Data_Source"
+  ) %>%
+  dplyr::select(-B.Gene, -B.Source, -B.Data_Source)
+
+# Save the statistics.
+writexl::write_xlsx(
+  wilcox_stats,
+  file.path("Results", "Statistics.xlsx")
+)
+```
+
+
+
+# Plot the data
+```{r message=FALSE, warning=FALSE, fig.width=5.5, fig.height=5}
+plt <- ggplot(
+  data = df_summary,
+  mapping = aes(Data_Source, MEAN, fill = Label)
+)+
+  geom_hline(yintercept = 0)+
+  geom_col(
+    position = position_dodge(),
+    alpha = 0.3
+  )+
+  ggbeeswarm::geom_quasirandom(
+    data = df,
+    mapping = aes(Data_Source, Expression, colour = Label),
+    dodge.width = 0.9, alpha = 0.6
+  )+
+  facet_grid(Gene ~ Source, scales = "free_x", space = "free_x")+
+  scale_fill_manual(values = c("#ff4d4d", "#0099ff"))+
+  scale_colour_manual(values = c("#ff4d4d", "#0099ff"))+
+  theme(
+    strip.background = element_blank(),
+    strip.text.y = element_text(face = "italic"),
+    axis.title.x = element_blank(),
+    legend.title = element_blank(),
+    panel.spacing = unit(0.8, "lines")
+  )+
+  ylab(bquote(log[2]~(Expression)))+
+  geom_text(
+    data = wilcox_stats %>%
+      dplyr::mutate(Label = "AIUP"),
+    mapping = aes(
+      Data_Source,
+      5.3,
+      label = ifelse(
+        FDR < 0.01,
+        formatC(FDR, format = "e", digits = 1),
+        signif(FDR, digits = 2)
+      )
+    ),
+    size = 3, hjust = 0.5
+  )+
+  coord_cartesian(ylim = c(-3,6))+
+  scale_y_continuous(expand = expand_scale())
+
+# Save the plot.
+cowplot::save_plot(
+  file.path("Results", "ExpressionFigure.tiff"),
+  plt,
+  base_width = 5.5, base_height = 5
+)
+
+# Display the plot.
+plt
+```
+
+
+End of analysis

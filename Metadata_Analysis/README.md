@@ -30,3 +30,9 @@ Start the Docker image used for this analysis (see the upper level README to see
 
 
 The step-by-step description of the analysis is contained in *Metadata_Analysis.html*. All tables and figures included in *Metadata_Analysis.html* are stored in the *Results* folder.
+
+
+# Methods
+
+
+This analysis compares AIUP and ECT groups with respect to a number of numerical variables by performing two tailed t tests.
